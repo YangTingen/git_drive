@@ -1,0 +1,140 @@
+Imports System.IO.Ports
+Imports System.Text
+Imports System.Collections.Generic
+
+Public Module ServoCommunicationModule
+    
+    ' 宣告 SerialPort 物件
+    Private servoPort As SerialPort = Nothing
+    
+    ' 通訊控制碼
+    Private Const STX As Byte = &H02  ' Start of Text
+    Private Const ETX As Byte = &H03  ' End of Text
+
+    ''' <summary>
+    ''' 設定並開啟串行埠連線。
+    ''' </summary>
+    ''' <returns>如果成功開啟則為 True。</returns>
+    Public Function OpenServoPort(ByVal portName As String, ByVal baudRate As Integer) As Boolean
+        Try
+            ' 檢查是否已存在物件
+            If servoPort IsNot Nothing AndAlso servoPort.IsOpen Then servoPort.Close()
+            
+            servoPort = New SerialPort() With {
+                .PortName = portName,
+                .BaudRate = baudRate,
+                .Parity = Parity.None,          ' 根據 J4 手冊設定
+                .DataBits = 8,                  ' 根據 J4 手冊設定
+                .StopBits = StopBits.One,       ' 根據 J4 手冊設定
+                .ReadTimeout = 2000,            ' 讀取超時 (毫秒)
+                .WriteTimeout = 1000            ' 寫入超時 (毫秒)
+            }
+
+            servoPort.Open()
+            Return True
+        Catch ex As Exception
+            Console.WriteLine($"開啟串行埠錯誤: {ex.Message}")
+            Return False
+        End Try
+    End Function
+
+    ''' <summary>
+    ''' 關閉串行埠連線。
+    ''' </summary>
+    Public Sub CloseServoPort()
+        If servoPort IsNot Nothing AndAlso servoPort.IsOpen Then
+            servoPort.Close()
+        End If
+    End Sub
+
+    ''' <summary>
+    ''' 根據手冊規則計算檢查碼 (BCC)。
+    ''' 規則：算術和，範圍從局號到 ETX (不含 STX)。只取低 8 位元 (Low Byte) 結果。
+    ''' </summary>
+    ''' <param name="contentBytes">從局號到 ETX 的位元組陣列。</param>
+    ''' <returns>兩個 ASCII 字符的檢查碼位元組陣列 (例如 {&H30, &H37} 即 "07")。</returns>
+    Private Function CalculateBCC(ByVal contentBytes As Byte()) As Byte()
+        ' 使用 Integer 來儲存總和，以處理可能超過 255 (FFH) 的進位
+        Dim sum As Integer = 0
+
+        ' 執行 16 進制算術和 (將所有位元組相加)
+        For Each b As Byte In contentBytes
+            sum += b
+        Next
+
+        ' 只取總和結果的低 8 位元 (相當於 sum Mod 256)
+        Dim checkSumByte As Byte = CByte(sum And &HFF) 
+        
+        ' 將 Checksum Byte 轉換為兩個 ASCII 字元
+        ' 例如: 07H -> "07", A9H -> "A9"
+        ' "X2" 格式確保是兩個字元 (例如 07)
+        Dim hexString As String = checkSumByte.ToString("X2") 
+
+        ' 將 "07" 轉換為 ASCII 位元組 {&H30, &H37}
+        Dim asciiBytes As Byte() = Encoding.ASCII.GetBytes(hexString)
+        
+        Return asciiBytes
+    End Function
+
+    ''' <summary>
+    ''' 構建並發送讀取指令電文，然後讀取回覆。
+    ''' 讀取指令: 局號 '0', 指令 '01', 資料碼 '0C'
+    ''' </summary>
+    ''' <returns>伺服驅動器的原始回覆電文，如果失敗則為空字串。</returns>
+    Public Function SendReadCommand() As String
+        If servoPort Is Nothing OrElse Not servoPort.IsOpen Then
+            Console.WriteLine("錯誤：串行埠未開啟。")
+            Return ""
+        End If
+        
+        ' 1. 定義電文內容 (ASCII 字元)
+        Dim stationNo As String = "0"
+        Dim command As String = "01"
+        Dim dataCode As String = "0C"
+        
+        ' 2. 準備電文內容 (從局號到資料碼)
+        Dim telegramContentString As String = stationNo & command & dataCode
+        Dim telegramContentBytes As Byte() = Encoding.ASCII.GetBytes(telegramContentString)
+        
+        ' 3. 準備檢查碼的計算範圍 (局號 + 指令 + 資料碼 + ETX)
+        Dim checkSumRangeList As New List(Of Byte)
+        checkSumRangeList.AddRange(telegramContentBytes)
+        checkSumRangeList.Add(ETX) ' **根據您的規則，包含 ETX**
+        
+        ' 4. 計算檢查碼
+        ' 範例計算：30 30 31 30 43 03 -> 總和 107H -> 低位 07H -> ASCII "07" (30 37)
+        Dim checkSumBytes As Byte() = CalculateBCC(checkSumRangeList.ToArray())
+
+        ' 5. 組裝完整的發送電文 (STX + 內容 + ETX + 檢查碼)
+        Dim txBuffer As New List(Of Byte)
+        txBuffer.Add(STX)                           ' STX
+        txBuffer.AddRange(telegramContentBytes)     ' 局號 + 指令 + 資料碼
+        txBuffer.Add(ETX)                           ' ETX (放在檢查碼之前，但包含在檢查碼計算中)
+        txBuffer.AddRange(checkSumBytes)            ' 檢查碼
+        
+        ' 最終 HEX 序列: 02 30 30 31 30 43 03 30 37 (10 bytes)
+
+        Try
+            ' 6. 發送指令
+            servoPort.Write(txBuffer.ToArray(), 0, txBuffer.Count)
+            
+            ' 7. 等待並讀取回覆電文
+            ' 注意: 實際回覆長度會根據讀取的數據類型而變化。
+            ' 這裡使用 ReadExisting 作為基本範例
+            Dim response As String = servoPort.ReadExisting()
+            
+            ' TODO: 必須在此處實作對回覆電文的解析、驗證回覆的檢查碼，並擷取數據。
+            ' 正常回覆格式通常為: STX + 局號 + 0 + 數據 + ETX + Checksum
+            
+            Return response
+            
+        Catch ex As TimeoutException
+            Console.WriteLine("通訊超時，未收到回覆。")
+            Return ""
+        Catch ex As Exception
+            Console.WriteLine($"發送/讀取錯誤: {ex.Message}")
+            Return ""
+        End Try
+    End Function
+
+End Module

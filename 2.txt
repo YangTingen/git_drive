@@ -1,0 +1,26 @@
+' 範例呼叫：
+Sub Main()
+    ' 1. 開啟串行埠 (請替換為您的實際設定)
+    If OpenServoPort("COM1", 9600) Then
+        
+        Console.WriteLine("串行埠開啟成功，發送讀取指令...")
+        
+        ' 2. 發送指令並獲取原始回覆
+        Dim rawResponse As String = SendReadCommand()
+        
+        If Not String.IsNullOrEmpty(rawResponse) Then
+            Console.WriteLine($"伺服驅動器回覆: {rawResponse}")
+            
+            ' 3. 在此處實作對 rawResponse 的解析邏輯，提取數據。
+            ' (例如，若回覆包含絕對位置數據，您需要將其從 HEX 轉為 10 進制)
+            
+        Else
+            Console.WriteLine("未收到有效回覆。")
+        End If
+        
+        ' 4. 關閉串行埠
+        CloseServoPort()
+    Else
+        Console.WriteLine("無法建立通訊。")
+    End If
+End Sub
