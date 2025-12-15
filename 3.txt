@@ -1,0 +1,99 @@
+Imports System.IO.Ports
+Imports System.Threading
+
+Module Module1
+    ' 設定: 請根據您的實際接線修改
+    Const COM_PORT As String = "COM3"
+    Const BAUD_RATE As Integer = 38400  ' 需對應參數 PC21
+    Const SLAVE_ID As Byte = 1          ' 需對應參數 PC20
+
+    Sub Main()
+        Console.WriteLine("=== 三菱 MR-J4-A Modbus RTU 讀取測試 ===")
+
+        Using serial As New SerialPort(COM_PORT, BAUD_RATE, Parity.Even, 8, StopBits.One)
+            Try
+                serial.ReadTimeout = 1000
+                serial.Open()
+                Console.WriteLine($"Port {COM_PORT} 已開啟")
+
+                ' 迴圈讀取測試
+                For i As Integer = 1 To 10
+                    ' === 讀取指令: 讀取 [伺服馬達當前位置] ===
+                    ' MR-J4-A Modbus 手冊位址: 2B2Fh (累積回授脈衝, 32-bit, 2個Word)
+                    ' 注意: 三菱的 Modbus 位址通常是 Hex，不需要 +40001
+                    Dim position As Integer = ReadInt32(serial, SLAVE_ID, &H2B2F)
+                    
+                    Console.WriteLine($"[{DateTime.Now:HH:mm:ss}] 當前位置 (Pulse): {position}")
+                    
+                    Thread.Sleep(500) ' 休息 0.5 秒
+                Next
+
+            Catch ex As TimeoutException
+                Console.WriteLine("錯誤: 讀取逾時 (請檢查接線 TX/RX 是否接反，或參數 PC21 是否正確)")
+            Catch ex As Exception
+                Console.WriteLine($"錯誤: {ex.Message}")
+            Finally
+                If serial.IsOpen Then serial.Close()
+            End Try
+        End Using
+
+        Console.WriteLine("測試結束，請按 Enter 離開...")
+        Console.ReadLine()
+    End Sub
+
+    ''' <summary>
+    ''' 讀取 32-bit 整數 (讀取 2 個 Register)
+    ''' </summary>
+    Function ReadInt32(sp As SerialPort, slaveId As Byte, startAddress As UShort) As Integer
+        ' 1. 建立 Request (由 8 bytes 組成)
+        Dim request(7) As Byte
+        request(0) = slaveId              ' 站號
+        request(1) = &H3                  ' Function Code (03 Read Holding Registers)
+        request(2) = CByte(startAddress \ 256)   ' 位址 Hi
+        request(3) = CByte(startAddress And &HFF) ' 位址 Lo
+        request(4) = &H0                  ' 讀取數量 Hi
+        request(5) = &H2                  ' 讀取數量 Lo (32bit = 2 words)
+        
+        Dim crc As UShort = CalculateCRC(request, 6)
+        request(6) = CByte(crc And &HFF)  ' CRC Lo
+        request(7) = CByte(crc \ 256)     ' CRC Hi
+
+        ' 2. 發送
+        sp.DiscardInBuffer()
+        sp.Write(request, 0, request.Length)
+
+        ' 3. 接收 (回應長度: 1(ID) + 1(FC) + 1(BytesCount) + 4(Data) + 2(CRC) = 9 bytes)
+        Dim buffer(8) As Byte
+        Dim bytesRead As Integer = 0
+        While bytesRead < 9
+            bytesRead += sp.Read(buffer, bytesRead, 9 - bytesRead)
+        End While
+
+        ' 4. 解析資料 (Big Endian)
+        ' buffer(3) = High Word_High Byte
+        ' buffer(4) = High Word_Low Byte
+        ' buffer(5) = Low Word_High Byte
+        ' buffer(6) = Low Word_Low Byte
+        ' 注意: 三菱 J4 通常回傳 Big-Endian (高位在前)
+        Dim hexVal As String = buffer(3).ToString("X2") & buffer(4).ToString("X2") & buffer(5).ToString("X2") & buffer(6).ToString("X2")
+        Return Convert.ToInt32(hexVal, 16)
+    End Function
+
+    ''' <summary>
+    ''' 標準 Modbus CRC16 計算
+    ''' </summary>
+    Function CalculateCRC(data As Byte(), length As Integer) As UShort
+        Dim crc As UShort = &HFFFF
+        For i As Integer = 0 To length - 1
+            crc = crc Xor data(i)
+            For j As Integer = 0 To 7
+                If (crc And &H1) = 1 Then
+                    crc = (crc >> 1) Xor &HA001
+                Else
+                    crc = crc >> 1
+                End If
+            Next
+        Next
+        Return crc
+    End Function
+End Module
